@@ -7,12 +7,16 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"time"
 )
 
 type Replicache struct {
-	logger  *slog.Logger
-	db      *sql.DB
-	handler Handler
+	logger              *slog.Logger
+	db                  *sql.DB
+	handler             Handler
+	clientOnPush        bool
+	clientOnPull        bool
+	clientPurgeDuration time.Duration
 }
 
 func (rep *Replicache) PushHandler() http.Handler {
@@ -28,37 +32,33 @@ func (rep *Replicache) PushHandler() http.Handler {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-		if err := handlePush(r.Context(), rep.db, ClientInfo{
+		if err := rep.handlePush(r.Context(), ClientInfo{
 			Auth:          r.Header.Get("Authorization"),
 			ClientGroupID: req.ClientGroupID,
 			ProfileID:     req.ProfileID,
 			SchemaVersion: req.SchemaVersion,
 		},
 			req.Mutations,
-			rep.handler,
 		); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
 		}
-
+		w.WriteHeader(http.StatusOK)
 	})
-
 }
 
-func handlePush(
-	ctx context.Context,
-	db *sql.DB,
-	info ClientInfo,
-	mutations []Mutation,
-	handler PushHandler) error {
+func (rep *Replicache) handlePush(ctx context.Context, info ClientInfo, mutations []Mutation) error {
 
-	tx, err := db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
+	tx, err := rep.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback()
 
-	if err := handler.HandlePush(PushRequest{
+	// TODO: check all clientIDs for mutations exist in client group
+	// or add them if createOnPush is true
+
+	if err := rep.handler.HandlePush(ctx, PushRequest{
 		ClientInfo: info,
 		Mutations:  mutations,
 		Tx:         tx,
@@ -96,11 +96,11 @@ func NewReplicache(db *sql.DB, handler Handler, options ...Option) (*Replicache,
 }
 
 type PushHandler interface {
-	HandlePush(pr PushRequest) error
+	HandlePush(ctx context.Context, pr PushRequest) error
 }
 
 type PullHandler interface {
-	HandlePull(pr PullRequest) (any, error)
+	HandlePull(ctx context.Context, pr PullRequest) (any, error)
 }
 
 type PushRequest struct {
